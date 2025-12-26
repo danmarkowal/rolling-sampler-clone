@@ -1,0 +1,16 @@
+[package]
+name = "rolling-sampler-clone"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[workspace]
+members = ["xtask"]
+
+[dependencies]
+drag = "2.1.0"
+fraction = "0.15.3"
+nih_plug = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "custom", features = ["assert_process_allocs", "standalone"] }
+nih_plug_egui = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "custom"}
