@@ -1,28 +1,18 @@
-use std::{fmt::Display, sync::Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
-use fraction::Fraction;
+use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use nih_plug_egui::{EguiState, create_egui_editor};
 
-mod editor;
-pub enum BufferSize {
-    Seconds(f32),
-    Beats(Fraction)
-}
+use crate::buffer_size::Note;
 
-impl Display for BufferSize {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BufferSize::Seconds(s) => write!(f, "{}s", s),
-            BufferSize::Beats(b) => write!(f, "{} beats", b)
-        }
-    }
-}
+mod buffer_size;
+mod dir;
+mod editor;
 
 pub struct RollingSamplerClone {
     params: Arc<RollingSamplerCloneParams>,
-    channel_buffers: Vec<Vec<f32>>,
-    buffer_size: BufferSize
+    channel_buffers: Vec<Vec<f32>>
 }
 
 #[derive(Params)]
@@ -31,27 +21,39 @@ pub struct RollingSamplerCloneParams {
     #[persist = "editor-state"]
     editor_state: Arc<EguiState>,
 
-    #[id = "gui-theme"]
-    theme_type: EnumParam<editor::ThemeType>,
+    #[nested(group = "buffer-size")]
+    buffer_size: Arc<buffer_size::BufferSize>,
+
+    #[persist = "gui-theme"]
+    theme_type: Arc<AtomicCell<editor::ThemeType>>,
 
     /// Clears the buffer when the transport starts playing
-    #[id = "clear-on-play"]
-    clear_on_play: BoolParam,
+    #[persist = "clear-on-play"]
+    clear_on_play: Arc<AtomicBool>,
 
     /// Removes silence at the beginning and end of an audio clip before it is saved
     /// This excludes the first and last samples in the clip if they are equal to zero
     /// Audio clips that consist of only silence won't be saved regardless
-    #[id = "trim-silence"]
-    trim_silence: BoolParam
+    #[persist = "trim-silence"]
+    trim_silence: Arc<AtomicBool>,
+
+    // / Directory where saved clips are stored
+    // #[persist = "clip_path"]
+    // clip_path: Arc<Mutex<PathBuf>>
 }
 
 impl Default for RollingSamplerCloneParams {
     fn default() -> Self {
         Self {
             editor_state: EguiState::from_size(600, 150),
-            theme_type: EnumParam::new("Gui Theme", editor::ThemeType::Dark).non_automatable(),
-            clear_on_play: BoolParam::new("Clear on Play", false).non_automatable(),
-            trim_silence: BoolParam::new("Trim Silence", true).non_automatable()
+            buffer_size: Arc::new(buffer_size::BufferSize {
+                unit: Arc::new(AtomicCell::new(buffer_size::BufferSizeUnit::Seconds)),
+                seconds: Arc::new(AtomicF32::new(10.0)),
+                notes: Arc::new(AtomicCell::new(Note(1, 4))), }),
+            theme_type: Arc::new(AtomicCell::new(editor::ThemeType::Dark)),
+            clear_on_play: Arc::new(AtomicBool::new(false)),
+            trim_silence: Arc::new(AtomicBool::new(true)),
+            // clip_path: Arc::new(Mutex::new(dir::default_clip_dir()))
         }
     }
 }
@@ -62,7 +64,6 @@ impl Default for RollingSamplerClone {
         Self {
             params: Arc::new(RollingSamplerCloneParams::default()),
             channel_buffers: Vec::new(),
-            buffer_size: BufferSize::Seconds(4.0)
         }
     }
 }
@@ -121,7 +122,7 @@ impl Plugin for RollingSamplerClone {
                 editor::build_ui(ctx);
             },
             // move captures by value
-            move |ctx, setter, state| {
+            move |ctx, setter, _state| {
                 editor::update_ui(ctx, closure_state.as_ref(), params.as_ref(), setter);
             })
     }

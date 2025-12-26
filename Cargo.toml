@@ -10,7 +10,10 @@ crate-type = ["cdylib", "lib"]
 members = ["xtask"]
 
 [dependencies]
+crossbeam = "0.8"
+dirs-next = "2.0.0"
 drag = "2.1.0"
-fraction = "0.15.3"
 nih_plug = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "custom", features = ["assert_process_allocs", "standalone"] }
 nih_plug_egui = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "custom"}
+rfd = "0.16.0"
+serde = { version = "1.0", features = ["derive"] }

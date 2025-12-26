@@ -1,9 +1,11 @@
-use std::{fmt::Display, sync::Arc};
+use std::{fmt::Display, ops::RangeInclusive, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
+use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use nih_plug_egui::{EguiState, egui::{self, *}, resizable_window::ResizableWindow};
+use serde::{Deserialize, Serialize};
 
-use crate::RollingSamplerCloneParams;
+use crate::{RollingSamplerCloneParams, buffer_size::{Note, BufferSizeUnit}};
 
 pub(crate) struct Theme {
     bg_color: Color32,
@@ -12,9 +14,12 @@ pub(crate) struct Theme {
     text_color: Color32
 }
 
-#[derive(Enum, PartialEq)]
+#[derive(Enum, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ThemeType {
+    #[default]
+    #[serde(rename = "dark")]
     Dark,
+    #[serde(rename = "light")]
     Light
 }
 
@@ -54,6 +59,15 @@ impl ThemeType {
 }
 
 const ACCENT_COLOR: Color32 = Color32::from_rgb(0, 157, 255);
+const SECONDS_RANGE: RangeInclusive<f32> = 0.0..=60.0;
+const NOTE_VALUES: [Note; 6] = [
+    Note(1, 4),
+    Note(1, 2),
+    Note(1, 1),
+    Note(2, 1),
+    Note(4, 1),
+    Note(8, 1),
+];
 
 pub(crate) fn build_ui(ctx: &Context) {
     // add custom font(s)
@@ -72,14 +86,15 @@ pub(crate) fn build_ui(ctx: &Context) {
 
 pub(crate) fn update_ui(ctx: &Context, egui_state: &EguiState, params: &RollingSamplerCloneParams, setter: &ParamSetter) {
     ResizableWindow::new("res-wind")
-        .min_size(Vec2::new(400.0, 100.0))
+        .min_size(Vec2::new(600.0, 120.0))
         .show(ctx, egui_state, |ui| {
+            let theme_type = params.theme_type.clone().load();
             let factory = UiFactory { 
-                theme: params.theme_type.value().theme()
+                theme: theme_type.theme()
             };
 
             // We may need to change visuals later instead if we want to change the accent color
-            ctx.set_theme(params.theme_type.value().egui_theme());
+            ctx.set_theme(theme_type.egui_theme());
 
             Frame::new()
                 .fill(factory.theme.bg_color)
@@ -112,56 +127,110 @@ impl UiFactory {
                 ui.set_height(16.0);
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Rolling Sampler Clone")
-                        .color(self.theme.text_color)
-                        .strong()
-                        .size(12.0));
+                    ui.label(self.text("Rolling Sampler Clone").strong());
             
                     ui.separator();
             
-                    ui.label(RichText::new("Buffer Size")
-                        .color(self.theme.text_color)
-                        .size(10.0));
+                    self.buffer_size_picker(ui, params);
 
-                    ui.add(DragValue::new(&mut 22050).range(0..=44100));
-
-                    ui.add(Button::new("Clear"));
+                    ui.add(Button::new("Clear Buffer"));
 
                     ui.separator();
+
+                    // This is kinda hacky but nothing else worked
+                    // Also for some reason it causes the waveform view to change size???
+                    ui.add_space(ui.available_width() - 20.0);
 
                     ui.menu_button("⚙", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(self.text("Theme"));
-
-                            let mut selected_theme = params.theme_type.value();
-                            ComboBox::from_id_salt("theme")
-                                .selected_text(self.text(selected_theme.to_string().as_str()))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut selected_theme, ThemeType::Dark,
-                                        self.text(ThemeType::Dark.to_string().as_str()));
-                                    ui.selectable_value(&mut selected_theme, ThemeType::Light,
-                                        self.text(ThemeType::Light.to_string().as_str()));
-                                });
-
-                            if selected_theme != params.theme_type.value() {
-                                setter.begin_set_parameter(&params.theme_type);
-                                setter.set_parameter(&params.theme_type, selected_theme);
-                                setter.end_set_parameter(&params.theme_type);
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label(self.text("Clear on Play"));
-                            ui.add(Checkbox::without_text(&mut false));
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label(self.text("Truncate Silence"));
-                            ui.add(Checkbox::without_text(&mut true))
-                        });
+                        self.theme_picker(ui, params.theme_type.clone());
+                        self.checkbox(ui, "Reset on Play", params.clear_on_play.clone()); 
+                        self.checkbox(ui, "Trim Silence", params.trim_silence.clone());
                     });
                 });
             });
+    }
+
+    fn buffer_size_picker(&self, ui: &mut Ui, params: &RollingSamplerCloneParams) {
+        ui.horizontal(|ui| {
+            ui.label(self.text("Buffer Size"));
+
+            let buffer_size = params.buffer_size.clone();
+
+            match buffer_size.unit.clone().load() {
+                BufferSizeUnit::Seconds => self.seconds_picker(ui, buffer_size.seconds.clone()),
+                BufferSizeUnit::Notes => self.notes_picker(ui, buffer_size.notes.clone()),
+            }
+            
+            self.buffer_size_unit_picker(ui, buffer_size.unit.clone());
+        });
+    }
+
+    fn notes_picker(&self, ui: &mut Ui, cell: Arc<AtomicCell<Note>>) {
+        let mut notes = cell.load();
+        
+        ComboBox::from_id_salt("notes")
+            .selected_text(self.text(notes.to_string().as_str()))
+            .show_ui(ui, |ui| {
+                for value in NOTE_VALUES.iter() {
+                   ui.selectable_value(&mut notes, *value, self.text(value.to_string().as_str()));
+                }
+            });
+
+        cell.store(notes);
+    }
+
+    fn seconds_picker(&self, ui: &mut Ui, cell: Arc<AtomicF32>) {
+        let mut seconds = cell.load(Ordering::Acquire);
+        ui.add(DragValue::new(&mut seconds)
+            .range(SECONDS_RANGE)
+            .fixed_decimals(1)
+            .speed(0.01));
+        cell.store(seconds, Ordering::Release);
+    }
+
+    fn buffer_size_unit_picker(&self, ui: &mut Ui, cell: Arc<AtomicCell<BufferSizeUnit>>) {
+        let mut selected = cell.load();
+
+        ComboBox::from_id_salt("buffer-size-unit")
+            .selected_text(self.text(selected.to_string().as_str()))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected, BufferSizeUnit::Seconds,
+                    self.text(BufferSizeUnit::Seconds.to_string().as_str()));
+                ui.selectable_value(&mut selected, BufferSizeUnit::Notes,
+                    self.text(BufferSizeUnit::Notes.to_string().as_str()));
+            });
+        
+        cell.store(selected);
+    }
+
+    fn theme_picker(&self, ui: &mut Ui, cell: Arc<AtomicCell<ThemeType>>) {
+        ui.horizontal(|ui| {
+            ui.label(self.text("Theme"));
+
+            // Cache this instead of cloning multiple times
+            let mut selected = cell.load();
+
+            ComboBox::from_id_salt("theme")
+                .selected_text(self.text(selected.to_string().as_str()))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected, ThemeType::Dark,
+                        self.text(ThemeType::Dark.to_string().as_str()));
+                    ui.selectable_value(&mut selected, ThemeType::Light,
+                        self.text(ThemeType::Light.to_string().as_str()));
+                });
+            
+            cell.store(selected);
+        });
+    }
+
+    fn checkbox(&self, ui: &mut Ui, label_text: &str, cell: Arc<AtomicBool>) {
+        ui.horizontal(|ui| {
+            ui.add(Label::new(self.text(label_text)));
+
+            let mut selected = cell.load(Ordering::Acquire);
+            ui.add(Checkbox::without_text(&mut selected));
+            cell.store(selected, Ordering::Release);
+        });
     }
     
     fn waveform_view(&self, ui: &mut Ui) {
@@ -207,7 +276,7 @@ impl UiFactory {
 
     fn text(&self, text: &str) -> RichText {
         RichText::new(text)
-            .size(10.0)
+            .size(12.0)
             .color(self.theme.text_color)
     }
 }
