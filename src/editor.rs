@@ -1,11 +1,16 @@
-use std::{fmt::Display, ops::RangeInclusive, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{fmt::Display, ops::RangeInclusive, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}};
 
 use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use nih_plug_egui::{EguiState, egui::{self, *}, resizable_window::ResizableWindow};
 use serde::{Deserialize, Serialize};
+use triple_buffer;
 
 use crate::{RollingSamplerCloneParams, buffer_size::{Note, BufferSizeUnit}};
+
+pub(crate) struct EditorState {
+    pub waveform_buffer_output: Arc<Mutex<triple_buffer::Output<Vec<f32>>>>
+}
 
 pub(crate) struct Theme {
     bg_color: Color32,
@@ -84,7 +89,7 @@ pub(crate) fn build_ui(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-pub(crate) fn update_ui(ctx: &Context, egui_state: &EguiState, params: &RollingSamplerCloneParams, setter: &ParamSetter) {
+pub(crate) fn update_ui(ctx: &Context, setter: &ParamSetter, state: &EditorState, egui_state: &EguiState, params: &RollingSamplerCloneParams) {
     ResizableWindow::new("res-wind")
         .min_size(Vec2::new(600.0, 120.0))
         .show(ctx, egui_state, |ui| {
@@ -107,7 +112,7 @@ pub(crate) fn update_ui(ctx: &Context, egui_state: &EguiState, params: &RollingS
                         ui.spacing_mut().item_spacing.y = 0.0;
 
                         factory.top_bar(ui, params, setter);
-                        factory.waveform_view(ui);
+                        factory.waveform_view(ui, state);
                     });
                 });
         });
@@ -233,7 +238,7 @@ impl UiFactory {
         });
     }
     
-    fn waveform_view(&self, ui: &mut Ui) {
+    fn waveform_view(&self, ui: &mut Ui, state: &EditorState) {
         Frame::new()
             .fill(self.theme.fg_color_primary)
             .outer_margin(Margin::same(8))
@@ -242,13 +247,14 @@ impl UiFactory {
                 ui.set_width(ui.available_width());
                 ui.set_height(ui.available_height());
 
-                let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::empty());
+                let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
                 let start_pos = Vec2::new(response.rect.min.x, (response.rect.min.y + response.rect.max.y) / 2.0);
 
                 let width = response.rect.max.x - response.rect.min.x;
                 let max_amplitude = (response.rect.max.y - response.rect.min.y) / 2.0 - 8.0;
 
-                // self.draw_waveform(&res, painter, start_pos, Vec2::new(width, max_amplitude), samples, Stroke::new(1.0, ACCENT_COLOR));
+                let mut buffer = state.waveform_buffer_output.lock().unwrap();
+                self.draw_waveform(&response, &painter, start_pos, Vec2::new(width, max_amplitude), buffer.read(), Stroke::new(1.0, ACCENT_COLOR));
             });
     }
 

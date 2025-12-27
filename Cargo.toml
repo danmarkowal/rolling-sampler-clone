@@ -17,3 +17,4 @@ nih_plug = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "cust
 nih_plug_egui = { git = "https://github.com/danmarkowal/nih-plug.git", branch = "custom"}
 rfd = "0.16.0"
 serde = { version = "1.0", features = ["derive"] }
+triple_buffer = "8.1.1"

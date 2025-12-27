@@ -1,10 +1,11 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use nih_plug_egui::{EguiState, create_egui_editor};
+use triple_buffer::{self, TripleBuffer};
 
-use crate::buffer_size::Note;
+use crate::{buffer_size::Note, editor::EditorState};
 
 mod buffer_size;
 mod dir;
@@ -12,7 +13,15 @@ mod editor;
 
 pub struct RollingSamplerClone {
     params: Arc<RollingSamplerCloneParams>,
-    channel_buffers: Vec<Vec<f32>>
+    /// We use this in 'processing' to set the samples in the buffer
+    /// Doesn't need to be reference counted because only accessed from backend
+    waveform_buffer_input: triple_buffer::Input<Vec<f32>>,
+    /// We pass this to the UI so it can read the samples
+    waveform_buffer_output: Arc<Mutex<triple_buffer::Output<Vec<f32>>>>,
+    /// This is where we actually store the samples
+    recording_buffer: Vec<Vec<f32>>,
+    buffer_size_invalidated: Arc<AtomicBool>,
+    parent_handle: Arc<AtomicCell<Option<ParentWindowHandle>>>
 }
 
 #[derive(Params)]
@@ -61,9 +70,15 @@ impl Default for RollingSamplerCloneParams {
 // I presume that this is how we set the state of the plugin when it is first loaded
 impl Default for RollingSamplerClone {
     fn default() -> Self {
+        let initial_samples: Vec<f32> = Vec::new();
+        let (input, output) = TripleBuffer::new(&initial_samples).split();
         Self {
             params: Arc::new(RollingSamplerCloneParams::default()),
-            channel_buffers: Vec::new(),
+            waveform_buffer_input: input,
+            waveform_buffer_output: Arc::new(Mutex::new(output)),
+            recording_buffer: Vec::new(),
+            buffer_size_invalidated: Arc::new(AtomicBool::new(false)),
+            parent_handle: Arc::new(AtomicCell::new(None)),
         }
     }
 }
@@ -102,28 +117,39 @@ impl Plugin for RollingSamplerClone {
 
     fn process(
         &mut self,
-        _buffer: &mut Buffer,
+        buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        for channel_samples in buffer.iter_samples() {
+            let samples: Vec<f32> = channel_samples.into_iter().map(|x| x.to_f32()).collect();
+        }
+
         ProcessStatus::Normal
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let params = self.params.clone();
         let editor_state = params.editor_state.clone();
-        // cannot move editor_state twice so we need two clones of the state arc
+        // Cannot move editor_state twice so we need two clones of the state arc
         let closure_state = params.editor_state.clone();
+        let parent_handle_cell = self.parent_handle.clone();
 
         create_egui_editor(
-            // this clone lives for as long as the editor exists
-            editor_state, (),
+            // This clone lives for as long as the editor exists
+            editor_state,
+            EditorState {
+                waveform_buffer_output: self.waveform_buffer_output.clone()
+            },
             |ctx, _| {
                 editor::build_ui(ctx);
             },
-            // move captures by value
-            move |ctx, setter, _state| {
-                editor::update_ui(ctx, closure_state.as_ref(), params.as_ref(), setter);
+            move |parent_handle| {
+                parent_handle_cell.store(Some(parent_handle));
+            },
+            // Move captures by value
+            move |ctx, setter, state| {
+                editor::update_ui(ctx, setter, state, closure_state.as_ref(), params.as_ref());
             })
     }
 }
